@@ -1,0 +1,3 @@
+[submodule "external/PLIP"]
+	path = external/PLIP
+	url = https://github.com/PathologyFoundation/plip.git

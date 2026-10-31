@@ -1,0 +1,15 @@
+{
+  "profile_name": "local_8gb_substitute",
+  "plip_lib_path": "external/PLIP",
+  "qwen_ckpt": "checkpoints/Qwen3-4B",
+  "plip_ckpt": "checkpoints/plip",
+  "patho_r1_ckpt": "checkpoints/Qwen2.5-VL-3B-Instruct",
+  "model_dtype": "auto",
+  "quantization": "nf4",
+  "executor_device_map": "auto",
+  "perceptor_device_map": "auto",
+  "executor_max_memory": {"0": "7.0GB", "cpu": "64GB"},
+  "perceptor_max_memory": {"0": "7.0GB", "cpu": "64GB"},
+  "plip_device": "cpu",
+  "allow_empty_descriptions": true
+}

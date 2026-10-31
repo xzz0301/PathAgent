@@ -1,0 +1,63 @@
+# Python environments, caches, editor-local settings
+.venv*/
+venv/
+envs/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+
+# Credentials and local machine overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.local.json
+
+# Downloaded weights and research data are provisioned separately
+/checkpoints/
+/models_runtime/
+/data/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.svs
+*.ndpi
+*.tif
+*.tiff
+*.h5
+*.npy
+*.npz
+*.zip
+*.tar
+*.tar.gz
+*.part
+*.filepart
+
+# Generated experiments, previews and local dataset manifests
+/outputs/
+/artifacts/
+/runs/
+/logs/
+/demo/results/
+/demo/patches/
+/demo/features/
+/demo/c1_independent/
+/demo/previews/
+/demo/expert_roi_tiles/
+/demo/descriptions.json
+/demo/questions.json
+*.log
+
+# Historical machine-generated audit snapshots and downloaded papers
+/docs/**/sources/
+/docs/**/*.json
+/docs/**/*.diff
+/sicap_url.txt

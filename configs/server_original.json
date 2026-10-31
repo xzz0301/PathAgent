@@ -1,0 +1,12 @@
+{
+  "profile_name": "server_original",
+  "plip_lib_path": "external/PLIP",
+  "qwen_ckpt": "checkpoints/Qwen3-4B",
+  "plip_ckpt": "checkpoints/plip",
+  "patho_r1_ckpt": "checkpoints/Patho-R1-7B",
+  "model_dtype": "bfloat16",
+  "quantization": "none",
+  "executor_device_map": "cuda:0",
+  "perceptor_device_map": "cuda:1",
+  "plip_device": "cuda:2"
+}
