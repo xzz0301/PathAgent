@@ -27,6 +27,7 @@ Official code implementation for paper "PathAgent: Toward Interpretable Analysis
 | 导航循环修复 | 精确切片 ID 优先、歧义拒绝；单候选相似度保持一维；保留补检历史；放大观察遵循 token 预算 | 默认仍为初选 10%、补检 5%、最多 5 轮；已修复 `torch.device` 元数据无法 JSON 序列化的问题 |
 | 可控实验参数 | 增加随机种子、固定初选数、轮数/输出预算与 `min_observation_rounds` | 最小轮数默认 1；调高属于外部覆盖干预，会记录原判断与干预事件 |
 | `demo/`、`pathogaze/`、`tools/` | 保存数据准备、PLIP 特征、轨迹检查、PathoGaze 探查和分卷权重校验工具 | 部分历史工具仍带本机路径；运行前按自己的数据位置配置 |
+| `tools/setup_quilt.py`、`tools/quilt_acceptance.py` | 创建 Quilt 独立兼容环境、本地 CLIP 配置 overlay，并对真实图块生成描述及保存验收记录 | 复用现有 CUDA 库，不降级主 Agent 环境；原权重和输入保持不变 |
 | `tests/` | 主循环分支、坐标、设备序列化和输入保护回归 | 使用临时合成输入和模型响应替身，不需要下载模型或真实切片 |
 | `external/PLIP` | 以 Git submodule 固定第三方 PLIP 源码版本 | 权重仍需单独准备；不把第三方 Git 历史复制进主项目 |
 
@@ -71,7 +72,9 @@ python -m unittest discover -s demo -p test_trajectory.py -v
 
 - 2026-10-23：6000D 上原 Qwen3-4B、Patho-R1-7B、PLIP 的单例加载、导航与轨迹导出通过。
 - 此前 C1 验证仅使用 64 个真实候选图块及允许空通用描述的 smoke 配置，不能代表完整预处理或正式评测。
-- 2026-10-24：Quilt-LLaVA 与其 CLIP 视觉塔权重完成文件校验；截至本次基线提交，专用环境与真实图块描述仍待验收。
+- 2026-10-24：Quilt-LLaVA 与其 CLIP 视觉塔权重完成文件校验。
+- 2026-10-31：6000D 的 Quilt 独立兼容环境完成安装；两张真实图块试运行及 C1 全部 64 张图块描述生成通过。主 Agent 严格输入检查确认 64 张图块、64 份特征、0 条空描述，未使用空描述豁免；主环境依赖前后相同。
+- 这次验收覆盖 Quilt 预处理和主 Agent 输入检查，尚未用新描述重跑完整 Agent 决策链或进行准确率评测。64 条描述中 1 条有明显重复，原始结果与质量标记均保留。环境版本、路径及重跑方式见 [Quilt 部署与验收](docs/quilt_20261031.md)。
 - Git 仅保存源码、配置和说明；权重、切片、生成图块、特征、实验结果、虚拟环境和凭据均不提交。
 
 早期合并过程见 [合并与迁移说明](docs/consolidation_20261022/合并与服务器迁移说明.md)。
