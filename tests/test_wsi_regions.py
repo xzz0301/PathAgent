@@ -1,6 +1,8 @@
 import unittest
+import tempfile
+from pathlib import Path
 from PIL import Image
-from wsi_regions import WSIReader,observation_roi
+from wsi_regions import WSIReader,observation_roi,file_fingerprint
 
 class Slide:
     dimensions=(4096,4096);level_downsamples=(1.,4.)
@@ -34,4 +36,15 @@ class WSITests(unittest.TestCase):
             image,meta=reader.read(dict(x0=3072.5,y0=3072.5,width0=1023.5,height0=1023.5),20)
             self.assertEqual(meta['roi'],dict(x0=3072,y0=3072,width0=1024,height0=1024))
             self.assertEqual(image.size,(512,512))
+    def test_optional_quickhash_fallback_checks_file_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path=Path(temporary)/'slide.bin';path.write_bytes(b'original slide')
+            manifest=dict(path=str(path),quickhash=None,file_fingerprint=file_fingerprint(path),
+                          dimensions=[4096,4096],nominal_native_magnification=40)
+            slide=Slide();slide.properties={}
+            with WSIReader(manifest,slide) as reader:
+                self.assertEqual(reader.native,40)
+            path.write_bytes(b'different slide')
+            with self.assertRaisesRegex(ValueError,'identity'):
+                WSIReader(manifest,slide)
 if __name__=='__main__':unittest.main()
