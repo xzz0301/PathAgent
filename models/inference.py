@@ -79,7 +79,7 @@ def _call_llm_return_json_simple(model, tokenizer, messages, max_new_tokens=256,
 
 def evaluate_with_llm_chain(model, tokenizer, description, question, choices=None,
                                max_new_tokens_a=512, max_new_tokens_b=256, max_new_tokens_c=256,
-                               retries=1):
+                               retries=1, region_options=None):
     """
     Three-step logic chain (simplified):
       Step A: Generate answer + thinking_steps
@@ -164,6 +164,20 @@ def evaluate_with_llm_chain(model, tokenizer, description, question, choices=Non
         '  "zoom_reason": "brief reason why zooming helps"\n'
         "}"
     )
+    if region_options is not None:
+        system_c = (
+            "You are an expert AI pathology assistant. If the current descriptions are insufficient, "
+            "identify the missing visual evidence. Plan actions only for the supplied ROI IDs. "
+            "Do not invent coordinates or claim unobserved high-magnification findings. "
+            "Return one JSON object with missing_info (short retrieval phrase), "
+            "zoom_recommendation (Yes or No), recommended_zoom_level, zoom_reason, and region_plans. "
+            "region_plans is a list of objects: {patch_name: exact supplied ROI ID, "
+            "zoom_recommendation: Yes or No, recommended_zoom_level: supplied allowed magnification, "
+            "missing_info: visual evidence needed in this ROI, zoom_reason: why this ROI needs that scale}. "
+            "Use only allowed magnifications strictly above that ROI's current magnification for a Yes action. "
+            "For a No action use the current magnification. Return [] when new regions must be explored."
+        )
+        max_new_tokens_c = max(max_new_tokens_c, 1024)
 
     user_c = (
         f"Descriptions:\n{description}\n\n"
@@ -172,6 +186,8 @@ def evaluate_with_llm_chain(model, tokenizer, description, question, choices=Non
         f"Sufficiency judgement: {json.dumps(parsed_b, ensure_ascii=False)}\n\n"
         "Now provide the JSON for missing info and zoom recommendation."
     )
+    if region_options is not None:
+        user_c += "\nAvailable ROIs and valid actions:\n" + json.dumps(region_options, ensure_ascii=False)
     messages_c = [{"role": "system", "content": system_c}, {"role": "user", "content": user_c}]
     full_c, parsed_c = _call_llm_return_json_simple(model, tokenizer, messages_c,
                                                    max_new_tokens=max_new_tokens_c, retries=retries)
@@ -192,6 +208,7 @@ def evaluate_with_llm_chain(model, tokenizer, description, question, choices=Non
         "zoom_recommendation": parsed_c.get("zoom_recommendation"),
         "zoom_level": parsed_c.get("recommended_zoom_level", 5),
         "zoom_reason": parsed_c.get("zoom_reason"),
+        **({"region_plans": parsed_c.get("region_plans", [])} if region_options is not None else {}),
         "raw_texts": {
             "step_a_raw": full_a,
             "step_b_raw": full_b,
@@ -309,7 +326,8 @@ def slide_llm_answer(
 
 def patho_r1_describe(image, question=None, 
                     patho_r1_processor=None, patho_r1_model=None,
-                    coords=None, magnification=None, max_new_tokens=1024, choices=None, missing_info=None,input_audit=None):
+                    coords=None, magnification=None, max_new_tokens=1024, choices=None, missing_info=None,input_audit=None,
+                    prompt_mode="public_code"):
 
     meta_lines = []
     if coords is not None:
@@ -323,13 +341,15 @@ def patho_r1_describe(image, question=None,
 
     if question is None:
         prompt_body = "Please describe the pathology features in this image."
+    elif prompt_mode == "paper_morphology":
+        prompt_body = f"Please describe the pathology features related to the question: {question} in this image."
     else:
         prompt_body = (
             f"Question: {question}\n\n"
             "Answer the question and list the pathological features visible in the image that support your answer."
         )
 
-    if choices is not None:
+    if choices is not None and prompt_mode != "paper_morphology":
         prompt_body += f"\nChoices: {choices}"
     if missing_info is not None:
         prompt_body += f"\nMissing information: {missing_info}"
@@ -344,9 +364,11 @@ def patho_r1_describe(image, question=None,
         "The assistant must always maintain a polite, clear, and professional tone. "
         "All answers should be supported by established, reliable medical sources. "
         "The assistant should carefully consider visual details in pathology images, such as cell morphology, staining patterns, and tissue architecture. "
-        "If choices are given, the answer must be given from the choices."
-        "If Missing information is given, you need to focus on this part of the image."
     )
+    if prompt_mode != "paper_morphology":
+        system_prompt += "If choices are given, the answer must be given from the choices."
+    if prompt_mode != "paper_morphology" or missing_info is not None:
+        system_prompt += "If Missing information is given, you need to focus on this part of the image."
 
     # === Construct message input ===
     messages = [

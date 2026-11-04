@@ -1,0 +1,20 @@
+{
+  "profile_name": "server_original",
+  "method_profile": "paper_aligned",
+  "plip_lib_path": "external/PLIP",
+  "qwen_ckpt": "checkpoints/Qwen3-4B",
+  "plip_ckpt": "checkpoints/plip",
+  "patho_r1_ckpt": "checkpoints/Patho-R1-7B",
+  "model_dtype": "bfloat16",
+  "quantization": "none",
+  "executor_device_map": "cuda:0",
+  "perceptor_device_map": "cuda:1",
+  "plip_device": "cuda:2",
+  "image_backend": "wsi",
+  "initial_sample_count": 0,
+  "max_attempts": 5,
+  "min_observation_rounds": 1,
+  "seed": 128,
+  "perceptor_max_new_tokens": 1024,
+  "capture_observations": true
+}

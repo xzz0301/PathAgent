@@ -54,12 +54,16 @@ def validate_inputs(args):
     geometry = json.loads(Path(args.geometry_file).read_text(encoding="utf-8")) if args.geometry_file else {}
     manifests=json.loads(Path(args.wsi_manifest).read_text(encoding='utf-8')) if getattr(args,'image_backend','patch')=='wsi' else None
     cases = []
+    checked = set()
     for pair in pairs:
         key = pair["long_id"]
         matches = [key] if key in descriptions else [name for name in descriptions if name.startswith(key)]
         if len(matches) != 1:
             raise ValueError(f"Case {key}: expected one description key, found {matches}")
         key = matches[0]
+        if key in checked:
+            continue
+        checked.add(key)
         if manifests is not None:
             from wsi_regions import WSIReader
             if key not in manifests or key not in geometry:raise ValueError('Missing WSI/candidate identity: '+key)

@@ -92,5 +92,6 @@ def runtime_metadata(args, model, perceptor, plip):
         "minimum_observation_rounds": args.min_observation_rounds,
         "allow_empty_descriptions": args.allow_empty_descriptions,
         "image_backend":getattr(args,'image_backend','patch'),
+        "method_profile":getattr(args,'method_profile','public_code'),
         "zoom_source": "original_wsi" if getattr(args,'image_backend','patch')=='wsi' else "crop_existing_patch_not_higher_resolution_wsi",
     }

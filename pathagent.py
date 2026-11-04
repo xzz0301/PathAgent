@@ -15,6 +15,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="PathAgent inference with navigation trajectory logging")
     parser.add_argument("--config", help="JSON defaults; CLI options override config values")
     parser.add_argument("--profile-name", dest="profile_name", default="custom")
+    parser.add_argument('--method-profile', choices=['public_code', 'paper_aligned'], default='public_code')
     parser.add_argument("--model-dtype", dest="model_dtype", choices=["auto", "bfloat16", "float16", "float32"], default="auto")
     parser.add_argument("--quantization", choices=["none", "nf4"], default="none")
     parser.add_argument("--executor-device-map", default="auto")
@@ -219,8 +220,7 @@ def main(args=None):
         print(f"Ground Truth: {correct_answer}")
 
         # --- Step 1: Extract Data ---
-        descriptions_dict = get_specific_case_descriptions(args.descriptions_file, TARGET_LONG_ID)
-        descriptions_dict = deepcopy(descriptions_dict)
+        descriptions_dict = deepcopy(all_descriptions[TARGET_LONG_ID])
         print(f"Extracted {len(descriptions_dict)} patch descriptions.")
 
         # --- Step 2: Preload Features ---
@@ -247,6 +247,12 @@ def main(args=None):
         sims_all = np.atleast_1d((feats @ q_emb.T).squeeze())
 
         K = min(len(available_patches), args.initial_sample_count) if args.initial_sample_count > 0 else max(1, int(len(all_patch_names) * initial_sample_ratio))
+        if args.method_profile == 'paper_aligned':
+            if base_magnification != 5 or args.initial_sample_count or args.min_observation_rounds != 1:
+                raise ValueError('paper_aligned requires real 5x geometry, proportional sampling, and natural stopping')
+            if len(available_patches) != len(all_patch_names):
+                raise ValueError('paper_aligned requires features for every candidate')
+            K = max(1, __import__('math').ceil(len(all_patch_names) * initial_sample_ratio))
         topk_idx = np.argsort(sims_all)[-K:][::-1]
         initial_sample_names = [available_patches[i] for i in topk_idx]
         recorder.event("navigation_selected", round=1, action="initial_selection",
@@ -263,6 +269,23 @@ def main(args=None):
         final_answer = None
         all_results = []
         trajectory = recorder.points
+
+        if args.method_profile == 'paper_aligned':
+            from navigation import run_paper_case
+            case_result = run_paper_case(
+                args=args, case_id=TARGET_LONG_ID, result_id=unique_id, question=question_text,
+                choices=question_choices, descriptions=descriptions_dict, features=feature_cache,
+                initial_names=initial_sample_names, geometry=geometry, reader=reader, recorder=recorder,
+                executor=model, tokenizer=tokenizer, navigator=plip,
+                perceptor=patho_r1_model, processor=patho_r1_processor)
+            with open(save_path, 'w', encoding='utf-8') as handle:
+                json.dump(case_result, handle, ensure_ascii=False, indent=2)
+            all_case_results.append(case_result)
+            if reader:
+                reader.close()
+            gc.collect()
+            torch.cuda.empty_cache()
+            continue
 
         while attempt < max_attempts:
             attempt += 1
