@@ -30,7 +30,7 @@ def main():
     import cv2
     import numpy as np
     import openslide
-    from wsi_regions import WSIReader
+    from wsi_regions import WSIReader, file_fingerprint
 
     p = argparse.ArgumentParser()
     p.add_argument('--dataset', type=Path, required=True)
@@ -73,9 +73,12 @@ def main():
             if native not in [20,40]:
                 raise ValueError('Uncalibrated scanner objective: '+str(native))
             manifest = {'path':path,'slide_id':case,'dimensions':dims,
-                        'quickhash':slide.properties['openslide.quickhash-1'],
+                        'quickhash':slide.properties.get('openslide.quickhash-1'),
                         'nominal_native_magnification':native,'magnification_source':'openslide.objective-power'}
             overview = slide.get_thumbnail((3000,3000)).convert('RGB')
+        if not manifest['quickhash']:
+            manifest['file_fingerprint']=file_fingerprint(path)
+            manifest['identity_mode']='file size + head/tail 1MiB SHA256; not full-file SHA256'
         overview_dir = a.output/'overviews'; overview_dir.mkdir(exist_ok=True)
         overview.save(overview_dir/(case+'.png'))
         saturation = cv2.medianBlur(np.asarray(overview.convert('HSV'))[:,:,1], 7)

@@ -1,7 +1,20 @@
 """Verified level-0 ROI geometry and direct WSI pixel acquisition."""
 import math
+import hashlib
 from pathlib import Path
 from PIL import Image
+
+
+def file_fingerprint(path):
+    """Bounded file identity for slides whose scanner omits OpenSlide quickhash."""
+    path=Path(path)
+    size=path.stat().st_size
+    digest=hashlib.sha256(str(size).encode())
+    with path.open('rb') as handle:
+        digest.update(handle.read(1024*1024))
+        handle.seek(max(0,size-1024*1024))
+        digest.update(handle.read(1024*1024))
+    return digest.hexdigest()
 
 
 def observation_roi(row, geometry):
@@ -19,13 +32,15 @@ def observation_roi(row, geometry):
 
 class WSIReader:
     def __init__(self, manifest, slide=None):
-        if not manifest.get('quickhash') or not manifest.get('dimensions'):
-            raise ValueError('WSI manifest requires quickhash and dimensions')
+        if not (manifest.get('quickhash') or manifest.get('file_fingerprint')) or not manifest.get('dimensions'):
+            raise ValueError('WSI manifest requires quickhash or file fingerprint, and dimensions')
         if slide is None:
             import openslide
             slide=openslide.OpenSlide(str(manifest['path']))
         self.slide=slide;self.manifest=dict(manifest)
-        if list(slide.dimensions)!=manifest['dimensions'] or slide.properties.get('openslide.quickhash-1')!=manifest['quickhash']:
+        identity_ok=(slide.properties.get('openslide.quickhash-1')==manifest['quickhash'] if manifest.get('quickhash')
+                     else file_fingerprint(manifest['path'])==manifest['file_fingerprint'])
+        if list(slide.dimensions)!=manifest['dimensions'] or not identity_ok:
             slide.close();raise ValueError('WSI identity mismatch')
         self.native=float(manifest['nominal_native_magnification'])
         self.mpp=[float(slide.properties.get('openslide.mpp-'+axis,0)) or None for axis in ('x','y')]
@@ -57,7 +72,8 @@ class WSIReader:
         resampled=output_size!=read_size or extent[2:]!=read_size
         if resampled:image=image.transform(output_size,Image.Transform.EXTENT,extent,Image.Resampling.BICUBIC)
         meta={'image_source':'original_wsi','wsi_path':str(self.manifest['path']),
-              'wsi_quickhash':self.manifest['quickhash'],'slide_id':self.manifest.get('slide_id'),
+              'wsi_quickhash':self.manifest.get('quickhash'),'slide_id':self.manifest.get('slide_id'),
+              'file_fingerprint':self.manifest.get('file_fingerprint'),
               'requested_roi':dict(roi),'roi':dict(x0=left,y0=top,width0=w0,height0=h0),
               'requested_magnification':float(magnification),'nominal_magnification':float(magnification),
               'read_level':level,'actual_downsample':actual,'requested_downsample':d,
