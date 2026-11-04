@@ -115,7 +115,7 @@ def main():
         save(a.output/'inputs/descriptions.json',merged)
         state['stage']='plip_features';save(status_path,state)
         if not (a.output/'features_complete.json').exists():
-            run([py,PROJECT/'tools/prepare_camelyon_features.py','--input',a.output/'inputs','--project',PROJECT],'features.log')
+            run([py,PROJECT/'tools/prepare_plip_features.py','--input',a.output/'inputs','--project',PROJECT],'features.log')
             save(a.output/'features_complete.json', {'slides':86})
         config=json.loads((PROJECT/'configs/wsi_vqa_paper.json').read_text())
         for key in ['plip_lib_path','qwen_ckpt','plip_ckpt','patho_r1_ckpt']:

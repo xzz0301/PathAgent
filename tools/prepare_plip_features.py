@@ -1,4 +1,4 @@
-"""Encode only the frozen pilot pool with original PLIP weights."""
+"""Encode a prepared WSI candidate set with original PLIP weights."""
 import argparse,json,sys
 from pathlib import Path
 import numpy as np
