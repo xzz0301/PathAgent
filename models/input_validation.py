@@ -52,6 +52,7 @@ def validate_inputs(args):
     if not pairs:
         raise ValueError("No questions found")
     geometry = json.loads(Path(args.geometry_file).read_text(encoding="utf-8")) if args.geometry_file else {}
+    manifests=json.loads(Path(args.wsi_manifest).read_text(encoding='utf-8')) if getattr(args,'image_backend','patch')=='wsi' else None
     cases = []
     for pair in pairs:
         key = pair["long_id"]
@@ -59,6 +60,12 @@ def validate_inputs(args):
         if len(matches) != 1:
             raise ValueError(f"Case {key}: expected one description key, found {matches}")
         key = matches[0]
+        if manifests is not None:
+            from wsi_regions import WSIReader
+            if key not in manifests or key not in geometry:raise ValueError('Missing WSI/candidate identity: '+key)
+            with WSIReader(manifests[key]) as reader:
+                if list(reader.slide.dimensions)!=geometry[key].get('slide_dimensions_level0') or not geometry[key].get('level0_verified'):
+                    raise ValueError('Candidate/WSI geometry mismatch: '+key)
         desc = descriptions[key]
         if not desc:
             raise ValueError(f"Case {key}: no candidate patches")
@@ -85,4 +92,5 @@ def validate_inputs(args):
         cases.append({"case": key, "patches": len(desc), "features": features,
                       "empty_generic_descriptions": empty})
     return {"profile": args.profile_name, "models": reports, "cases": cases,
-            "warnings": ["Existing-patch cropping is used for zoom; no higher-resolution WSI read is performed."]}
+            "warnings": (["Existing-patch cropping is used for zoom; no higher-resolution WSI read is performed."]
+                         if getattr(args,'image_backend','patch')=='patch' else [])}

@@ -309,7 +309,7 @@ def slide_llm_answer(
 
 def patho_r1_describe(image, question=None, 
                     patho_r1_processor=None, patho_r1_model=None,
-                    coords=None, magnification=None, max_new_tokens=1024, choices=None, missing_info=None):
+                    coords=None, magnification=None, max_new_tokens=1024, choices=None, missing_info=None,input_audit=None):
 
     meta_lines = []
     if coords is not None:
@@ -371,6 +371,16 @@ def patho_r1_describe(image, question=None,
         padding=True,
         return_tensors="pt",
     ).to(patho_r1_model.device)
+
+    if input_audit is not None:
+        grid=inputs.get('image_grid_thw')
+        patch_size=getattr(patho_r1_processor.image_processor,'patch_size',14)
+        input_audit.update(source_size=list(image.size),vision_image_sizes=[list(im.size) for im in image_inputs],
+                           image_grid_thw=grid.detach().cpu().tolist() if grid is not None else None,
+                           patch_size=patch_size,
+                           processed_sizes=[[int(g[2])*patch_size,int(g[1])*patch_size] for g in grid] if grid is not None else None,
+                           processor_resize='Qwen vision resize; no spatial crop requested',
+                           prompt_sha256=__import__('hashlib').sha256(text.encode()).hexdigest())
 
     # === Inference generation ===
     with torch.no_grad():

@@ -25,6 +25,10 @@ def parse_args(argv=None):
     parser.add_argument("--allow-empty-descriptions", action=argparse.BooleanOptionalAction, default=False,
                         help="Explicitly allow incomplete generic descriptions for smoke tests")
     parser.add_argument("--check-inputs", action="store_true", help="Validate files without loading model weights")
+    parser.add_argument("--capture-observations", action=argparse.BooleanOptionalAction, default=True,
+                        help="Save exact Perceptor input images for offline evidence localization")
+    parser.add_argument('--image-backend',choices=['patch','wsi'],default='patch')
+    parser.add_argument('--wsi-manifest',help='Case-keyed WSI path, quickhash, dimensions and native nominal magnification')
 
     # --- Library Paths ---
     parser.add_argument("--plip_lib_path", type=str, required=False,
@@ -76,7 +80,7 @@ def parse_args(argv=None):
                 parser.error(f"Invalid config value for {action.dest}: {config[action.dest]}")
         path_keys = ["plip_lib_path", "qwen_ckpt", "plip_ckpt", "patho_r1_ckpt",
                      "descriptions_file", "questions_file", "feature_dir", "patch_root",
-                     "save_dir", "geometry_file"]
+                     "save_dir", "geometry_file", "wsi_manifest"]
         for key in path_keys:
             if config.get(key) and not Path(config[key]).is_absolute():
                 config[key] = str(Path(__file__).resolve().parent / config[key])
@@ -91,6 +95,8 @@ def parse_args(argv=None):
         parser.error("Attempt/token/round limits must be positive; initial_sample_count must be >= 0")
     if args.min_observation_rounds > args.max_attempts:
         parser.error("min_observation_rounds cannot exceed max_attempts")
+    if args.image_backend=='wsi' and (not args.wsi_manifest or not args.geometry_file):
+        parser.error('WSI backend requires wsi-manifest and geometry_file')
     return args
 
 
@@ -99,6 +105,7 @@ from models.inference import evaluate_with_llm_chain, slide_llm_answer, patho_r1
 from models.runtime import load_models, runtime_metadata
 from models.input_validation import validate_inputs
 from trajectory import TraceRecorder, export_trajectory_artifacts, split_zoom_patch
+from wsi_regions import WSIReader
 
 
 def main(args=None):
@@ -137,6 +144,9 @@ def main(args=None):
     if args.geometry_file:
         with open(args.geometry_file, encoding="utf-8") as handle:
             geometries = json.load(handle)
+    wsi_manifests={}
+    if args.image_backend=='wsi':
+        with open(args.wsi_manifest,encoding='utf-8') as handle:wsi_manifests=json.load(handle)
 
     tokenizer, model, plip, patho_r1_model, patho_r1_processor = load_models(args)
 
@@ -192,8 +202,15 @@ def main(args=None):
             raise ValueError(f"Missing geometry for case {TARGET_LONG_ID}")
         base_magnification = geometry["base_magnification"]
         coordinate_scale = geometry["coordinate_scale"]
+        reader=None
+        if args.image_backend=='wsi':
+            if TARGET_LONG_ID not in wsi_manifests:raise ValueError('Missing WSI identity for '+TARGET_LONG_ID)
+            reader=WSIReader(wsi_manifests[TARGET_LONG_ID])
+            if list(reader.slide.dimensions)!=geometry['slide_dimensions_level0'] or not geometry.get('level0_verified'):
+                reader.close();raise ValueError('Candidate geometry and WSI disagree')
+            geometry={**geometry,'image_backend':'wsi','wsi_quickhash':reader.manifest['quickhash']}
         zoom_level_val = base_magnification
-        recorder = TraceRecorder(args.save_dir, unique_id)
+        recorder = TraceRecorder(args.save_dir, unique_id, capture_images=args.capture_observations)
         recorder.event("run_started", geometry=geometry, seed=args.seed)
 
         print("="*80)
@@ -263,11 +280,17 @@ def main(args=None):
                 patch_img = load_image(patch_path)
 
                 x, y = extract_coords_from_name(patch_name)
+                roi=dict(x0=x,y0=y,width0=patch_img.width*coordinate_scale,height0=patch_img.height*coordinate_scale)
+                acquisition={'image_source':'saved_patch','roi':roi}
+                if reader:patch_img,acquisition=reader.read(roi,base_magnification)
+                input_audit={}
                 started = recorder.start_observation(
+                    image=patch_img,
                     round=attempt,
                     action="initial_observation" if attempt == 1 else "find_missing_observation",
                     patch_name=patch_name, x=x, y=y, width=patch_img.width, height=patch_img.height,
                     magnification=base_magnification,
+                    roi=acquisition['roi'],acquisition=acquisition,
                 )
                 question_specific_desc = patho_r1_describe(
                     patch_img,
@@ -277,8 +300,9 @@ def main(args=None):
                     coords=(x, y),
                     magnification=base_magnification,
                     choices=question_choices,
-                    max_new_tokens=args.perceptor_max_new_tokens
+                    max_new_tokens=args.perceptor_max_new_tokens,input_audit=input_audit
                 )
+                started[0]['model_input']=input_audit
                 recorder.complete_observation(started, question_specific_desc)
                 
                 orig = descriptions_dict.get(patch_name, "")
@@ -379,12 +403,17 @@ def main(args=None):
                     # split top2 patches into sub-patches at zoom_level_val
                     candidate_images = []
                     candidate_names = []
+                    candidate_acquisitions = []
                     for patch_name in top2_names:
                         patch_path = get_patch_fullpath(args.patch_root, TARGET_LONG_ID, patch_name)
                         sub_patches = split_zoom_patch(patch_path, zoom_level_val, base_magnification, coordinate_scale)
                         for sub_img, (x, y) in sub_patches:
+                            roi=dict(x0=x,y0=y,width0=sub_img.width*coordinate_scale,height0=sub_img.height*coordinate_scale)
+                            acquisition={'image_source':'crop_existing_patch','roi':roi}
+                            if reader:sub_img,acquisition=reader.read(roi,zoom_level_val)
                             candidate_images.append(sub_img)
                             candidate_names.append(f"{x:g}_{y:g}")
+                            candidate_acquisitions.append(acquisition)
 
                     if not candidate_images:
                         print("No sub-patches generated, skipping zoom process.")
@@ -395,6 +424,7 @@ def main(args=None):
                         best_idx = int(np.argmax(sims_sub))
                         best_img = candidate_images[best_idx]
                         best_name = candidate_names[best_idx]
+                        acquisition=candidate_acquisitions[best_idx]
                         print(f"Selected zoomed sub-patch: {best_name}")
                         recorder.event("navigation_selected", round=attempt, action="zoom_selection",
                                        patch_names=[best_name], candidate_count=len(candidate_names),
@@ -402,11 +432,13 @@ def main(args=None):
 
                         x, y = best_name.split("_")
                         started = recorder.start_observation(
+                            image=best_img,
                             round=attempt, action="zoom_observation", patch_name=best_name,
                             x=float(x), y=float(y), width=best_img.width, height=best_img.height,
                             magnification=zoom_level_val,
+                            roi=acquisition['roi'],acquisition=acquisition,
                         )
-
+                        input_audit={}
                         zoomed_patch_desc = patho_r1_describe(
                             best_img,
                             question=question_text,
@@ -415,8 +447,9 @@ def main(args=None):
                             coords=(x, y),
                             magnification=zoom_level_val,
                             choices=question_choices,
-                            max_new_tokens=args.perceptor_max_new_tokens
+                            max_new_tokens=args.perceptor_max_new_tokens,input_audit=input_audit
                         )
+                        started[0]['model_input']=input_audit
                         recorder.complete_observation(started, zoomed_patch_desc)
 
                         extra_note = (
@@ -546,6 +579,7 @@ def main(args=None):
             json.dump(case_result, f, indent=2, ensure_ascii=False)
 
         all_case_results.append(case_result)
+        if reader:reader.close()
 
         gc.collect()
         torch.cuda.empty_cache()

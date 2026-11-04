@@ -5,26 +5,36 @@ import json
 import math
 import os
 import time
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+from wsi_regions import observation_roi
 
 
 class TraceRecorder:
-    def __init__(self, output_dir, result_id):
+    def __init__(self, output_dir, result_id, capture_images=True):
         self.path = Path(output_dir) / f"{result_id}_events.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text("", encoding="utf-8")
         self.points = []
+        self.capture_images = capture_images
+        self.image_dir = Path(output_dir) / f"{result_id}_inputs"
 
     def event(self, event_type, **data):
         event = {"event": event_type, "timestamp_utc": datetime.now(timezone.utc).isoformat(), **data}
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
-    def start_observation(self, **data):
+    def start_observation(self, image=None, **data):
         row = {"step": len(self.points) + 1, "status": "started", **data}
+        if image is not None and self.capture_images:
+            self.image_dir.mkdir(parents=True, exist_ok=True)
+            target = self.image_dir / f"observation_{row['step']:04d}.png"
+            image.save(target)
+            row.update(input_image_path=str(target.resolve()),
+                       input_image_sha256=hashlib.sha256(target.read_bytes()).hexdigest())
         self.points.append(row)
         self.event("observation_started", **row)
         return row, time.perf_counter()
@@ -107,11 +117,12 @@ def _panel(tiles, trajectory, bounds, size, coordinate_scale, show_steps=True):
         panel.paste(thumbnail, (round(pos[0]), round(pos[1])))
     points = []
     for row in trajectory:
-        w, h = row["width"] * coordinate_scale, row["height"] * coordinate_scale
-        left, top = transform(row["x"], row["y"])
-        right, bottom = transform(row["x"] + w, row["y"] + h)
+        roi=observation_roi(row,{'coordinate_scale':coordinate_scale})
+        w,h=roi['width0'],roi['height0']
+        left, top = transform(roi['x0'],roi['y0'])
+        right, bottom = transform(roi['x0']+w,roi['y0']+h)
         draw.rectangle((left, top, right, bottom), outline="#ce3628", width=2)
-        points.append(transform(row["x"] + w / 2, row["y"] + h / 2))
+        points.append(transform(roi['x0']+w/2,roi['y0']+h/2))
     if show_steps:
         for a, b in zip(points, points[1:]):
             _arrow(draw, a, b)
@@ -145,15 +156,18 @@ def export_trajectory_artifacts(trajectory, patch_dir, output_dir, case_id, resu
 
     rows = []
     for row in trajectory:
-        center_x = row["x"] + row["width"] * coordinate_scale / 2
-        center_y = row["y"] + row["height"] * coordinate_scale / 2
+        roi=observation_roi(row,geometry)
+        center_x = roi['x0'] + roi['width0']/2
+        center_y = roi['y0'] + roi['height0']/2
         rows.append({**row, "case_id": case_id, "agent_id": result_id,
+                     **roi,'position_meaning':'ROI centre for navigation bookkeeping; not localized evidence',
                      "x_px": center_x, "y_px": center_y, "center_x": center_x, "center_y": center_y,
                      "coordinate_scale": coordinate_scale, "coordinate_space": geometry["coordinate_space"],
                      "level0_verified": geometry.get("level0_verified", False)})
     fields = ["case_id", "agent_id", "step", "round", "action", "patch_name", "status", "x", "y", "x_px", "y_px",
               "center_x", "center_y", "width", "height", "magnification", "inference_ms",
-              "coordinate_scale", "coordinate_space", "level0_verified"]
+              "coordinate_scale", "coordinate_space", "level0_verified", "input_image_path", "input_image_sha256",
+              'x0','y0','width0','height0','position_meaning','roi','acquisition','model_input']
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
