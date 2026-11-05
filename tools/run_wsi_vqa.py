@@ -15,6 +15,20 @@ sys.path.insert(0, str(PROJECT))
 from tools.prepare_wsi_vqa import save
 
 
+def process_running(pid):
+    try:
+        state=Path(f'/proc/{pid}/stat').read_text().split(') ',1)[1].split()[0]
+        return state!='Z'
+    except FileNotFoundError:
+        return False
+
+
+def gpu_free(index):
+    output=subprocess.check_output(['nvidia-smi','-i',str(index),'--query-gpu=memory.used',
+                                    '--format=csv,noheader,nounits'],text=True)
+    return int(output.strip())<512
+
+
 def caption_worker(root, gpu, server):
     import torch
     torch.manual_seed(128); torch.cuda.manual_seed_all(128)
@@ -69,6 +83,9 @@ def main():
     p.add_argument('--dataset', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--caption-worker', type=int)
+    p.add_argument('--uncalibrated-case', action='append', default=[])
+    p.add_argument('--adopt-caption-worker', type=int,
+                   help='Wait for the already running shard-0 worker, then fill any remaining shard-0 cases')
     a = p.parse_args()
     if a.caption_worker is not None:
         caption_worker(a.output,a.caption_worker,a.server)
@@ -93,13 +110,29 @@ def main():
         state['stage']='preparing_full_candidates';save(status_path,state)
         prepared=a.output/'inputs/preparation_status.json'
         if not prepared.exists() or json.loads(prepared.read_text()).get('stage')!='complete':
-            run([py,PROJECT/'tools/prepare_wsi_vqa.py','--dataset',a.dataset,'--output',a.output/'inputs'],'prepare.log')
+            command=[py,PROJECT/'tools/prepare_wsi_vqa.py','--dataset',a.dataset,'--output',a.output/'inputs']
+            for case in a.uncalibrated_case:
+                command.extend(['--uncalibrated-case',case])
+            run(command,'prepare.log')
         state['stage']='quilt_generic_descriptions';save(status_path,state)
 
         def worker(gpu):
+            if gpu==0 and a.adopt_caption_worker:
+                # The pre-existing shard-0 process uses physical GPU2. Its
+                # in-memory model and caption loop remain untouched.
+                while process_running(a.adopt_caption_worker):
+                    time.sleep(15)
+                prior=json.loads((a.output/'caption_worker_0.json').read_text())
+                if prior.get('stage')!='complete':
+                    raise RuntimeError('Adopted caption worker exited without completion')
+            device={0:2,1:0,2:1}[gpu] if a.adopt_caption_worker else gpu
+            while not gpu_free(device):
+                save(a.output/f'waiting_caption_gpu_{gpu}.json',{'gpu':device,'stage':'waiting_for_free_gpu','updated':time.time()})
+                time.sleep(20)
             env={**os.environ,'CUDA_VISIBLE_DEVICES':str(gpu),
                  'PYTHONPATH':str(a.server/'code/quilt_7e70fc3_20261031'),
                  'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1'}
+            env['CUDA_VISIBLE_DEVICES']=str(device)
             run([quilt_py,'-u',Path(__file__),'--server',a.server,'--dataset',a.dataset,'--output',a.output,
                  '--caption-worker',gpu],f'quilt_{gpu}.log',env)
 
@@ -111,12 +144,15 @@ def main():
         for file in sorted((a.output/'captions').glob('*/descriptions.json')):
             merged.update(json.loads(file.read_text()))
         manifest=json.loads((a.output/'inputs/wsi_manifest.json').read_text())
-        assert set(merged)==set(manifest) and len(merged)==86
+        protocol=json.loads((a.output/'inputs/protocol.json').read_text())
+        assert set(merged)==set(manifest) and len(merged)==protocol['eligible_slides']
         save(a.output/'inputs/descriptions.json',merged)
         state['stage']='plip_features';save(status_path,state)
         if not (a.output/'features_complete.json').exists():
+            while not gpu_free(0):
+                time.sleep(20)
             run([py,PROJECT/'tools/prepare_plip_features.py','--input',a.output/'inputs','--project',PROJECT],'features.log')
-            save(a.output/'features_complete.json', {'slides':86})
+            save(a.output/'features_complete.json', {'slides':len(manifest)})
         config=json.loads((PROJECT/'configs/wsi_vqa_paper.json').read_text())
         for key in ['plip_lib_path','qwen_ckpt','plip_ckpt','patho_r1_ckpt']:
             config[key]=str(PROJECT/config[key])
@@ -126,6 +162,10 @@ def main():
                       geometry_file=str(inp/'geometry.json'),wsi_manifest=str(inp/'wsi_manifest.json'))
         save(a.output/'run_config.json',config)
         state['stage']='full_test_inference';save(status_path,state)
+        while not all(gpu_free(i) for i in [0,1,2]):
+            state['stage']='waiting_for_inference_gpus';save(status_path,state)
+            time.sleep(20)
+        state['stage']='calibrated_test_inference';save(status_path,state)
         run([py,'-u',PROJECT/'pathagent.py','--config',a.output/'run_config.json'],'inference.log')
         state['stage']='metrics_and_selected_cases';save(status_path,state)
         run([py,PROJECT/'tools/evaluate_wsi_vqa.py','--root',a.output],'evaluation.log')

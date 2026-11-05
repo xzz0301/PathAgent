@@ -25,36 +25,53 @@ def norm(value):
     return re.sub(r'\s+', ' ', str(value).strip().lower().rstrip('.'))
 
 
-def main():
-    p=argparse.ArgumentParser();p.add_argument('--root',type=Path,required=True);a=p.parse_args();root=a.root
-    reference=json.loads((root/'inputs/reference.json').read_text())
-    manifest=json.loads((root/'inputs/wsi_manifest.json').read_text())
-    by_case={m['slide_id']:key for key,m in manifest.items()}
-    results={}
-    for f in (root/'agent').glob('*.json'):
-        value=json.loads(f.read_text())
-        if value.get('long_id') and 'pred_answer' in value:
-            results[(value['long_id'],value['question'])]=(value,f)
+def collect_rows(reference, by_case, results, exclusions):
     rows=[];opened=[];closed=[]
     for index,q in enumerate(reference):
-        key=by_case[q['Id']];result,path=results.get((key,q['Question']),({},None))
-        if result and result['ground_truth']!='WITHHELD':raise ValueError('Inference labels were not blinded')
+        key=by_case.get(q['Id'])
+        result,path=results.get((key,q['Question']),({},None)) if key else ({},None)
+        if result and result['ground_truth']!='WITHHELD':
+            raise ValueError('Inference labels were not blinded')
         pred=str(result.get('pred_answer') or '').strip()
         row={'index':index,'case_id':q['Id'],'question':q['Question'],'truth':q['Answer'],'prediction':pred,
-             'choices':q.get('Choice'),'result_file':str(path) if path else None,'status':'returned' if pred else 'missing',
+             'choices':q.get('Choice'),'result_file':str(path) if path else None,
+             'status':'returned' if pred else ('uncalibrated' if q['Id'] in exclusions else 'missing'),
+             'calibration_eligible':q['Id'] not in exclusions,
+             'exclusion_reason':exclusions.get(q['Id']),
              'rounds':len(result.get('process',[])),'observations':len(result.get('trajectory',[])),
              'termination_reason':result.get('termination_reason')}
         rows.append(row)
         if q.get('Choice'):
             row['compatible_correct']=compatible_correct(pred,q['Answer'],q['Choice'])
-            row['strict_correct']=norm(pred)==norm(q['Answer'])
+            row['strict_correct']=bool(pred) and norm(pred)==norm(q['Answer'])
             row['exact_option']=norm(pred) in {norm(v) for v in q['Choice']}
             closed.append(row)
         else:
             opened.append(row)
+    return rows,closed,opened
+
+
+def main():
+    p=argparse.ArgumentParser();p.add_argument('--root',type=Path,required=True);a=p.parse_args();root=a.root
+    reference=json.loads((root/'inputs/reference.json').read_text())
+    manifest=json.loads((root/'inputs/wsi_manifest.json').read_text())
+    by_case={m['slide_id']:key for key,m in manifest.items()}
+    excluded_path=root/'inputs/excluded_slides.json'
+    exclusions={r['case_id']:r['reason'] for r in json.loads(excluded_path.read_text())} if excluded_path.exists() else {}
+    results={}
+    for f in (root/'agent').glob('*.json'):
+        value=json.loads(f.read_text())
+        if value.get('long_id') and 'pred_answer' in value:
+            results[(value['long_id'],value['question'])]=(value,f)
+    rows,closed,opened=collect_rows(reference,by_case,results,exclusions)
     assert len(rows)==735 and len(closed)==390 and len(opened)==345
     save(root/'case_results.json',rows)
+    eligible_closed=[r for r in closed if r['calibration_eligible']]
+    eligible_open=[r for r in opened if r['calibration_eligible']]
+    eligible_rows=[r for r in rows if r['calibration_eligible']]
     metrics={'n_wsi':86,'n_questions':735,'closed_n':390,'open_n':345,'missing':sum(not r['prediction'] for r in rows),
+             'calibrated_wsi':len(manifest),'excluded_slides':exclusions,
+             'eligible_questions':len(eligible_rows),'eligible_closed_n':len(eligible_closed),'eligible_open_n':len(eligible_open),
              'closed_compatible_accuracy_pct':100*sum(r['compatible_correct'] for r in closed)/390,
              'closed_strict_accuracy_pct':100*sum(r['strict_correct'] for r in closed)/390,
              'closed_nonexact_option':sum(not r['exact_option'] for r in closed),
@@ -64,24 +81,37 @@ def main():
              'method':'paper-aligned reconstruction with regional plans and post-zoom reassessment, not unmodified upstream',
              'mean_evaluation_rounds':sum(r['rounds'] for r in rows)/735,
              'source_question_sha256':hashlib.sha256((root/'inputs/reference.json').read_bytes()).hexdigest()}
+    metrics['calibrated_subset']={
+        'closed_compatible_accuracy_pct':100*sum(r['compatible_correct'] for r in eligible_closed)/len(eligible_closed),
+        'closed_strict_accuracy_pct':100*sum(r['strict_correct'] for r in eligible_closed)/len(eligible_closed),
+        'closed_denominator':len(eligible_closed),'open_denominator':len(eligible_open),
+        'missing':sum(not r['prediction'] for r in eligible_rows),
+        'mean_evaluation_rounds':sum(r['rounds'] for r in eligible_rows)/len(eligible_rows)}
     from pycocoevalcap.bleu.bleu import Bleu
     from pycocoevalcap.meteor.meteor import Meteor
     from pycocoevalcap.rouge.rouge import Rouge
-    gts={str(r['index']):[r['truth']] for r in opened};res={str(r['index']):[r['prediction']] for r in opened}
-    meteor=Meteor()
-    try:
-        bleu,_=Bleu(4).compute_score(gts,res)
-        met,_=meteor.compute_score(gts,res)
-        rouge,_=Rouge().compute_score(gts,res)
-    finally:
-        proc=getattr(meteor,'meteor_p',None)
-        if proc is not None and proc.poll() is None:
-            proc.kill();proc.wait()
-    metrics['open_metrics_pct']={**{f'BLEU_{i+1}':100*v for i,v in enumerate(bleu)},'METEOR':100*met,'ROUGE_L':100*rouge}
+    def score_open(group):
+        gts={str(r['index']):[r['truth']] for r in group};res={str(r['index']):[r['prediction']] for r in group}
+        meteor=Meteor()
+        try:
+            bleu,_=Bleu(4).compute_score(gts,res)
+            met,_=meteor.compute_score(gts,res)
+            rouge,_=Rouge().compute_score(gts,res)
+        finally:
+            proc=getattr(meteor,'meteor_p',None)
+            if proc is not None and proc.poll() is None:
+                proc.kill();proc.wait()
+        return {**{f'BLEU_{i+1}':100*v for i,v in enumerate(bleu)},'METEOR':100*met,'ROUGE_L':100*rouge}
+    metrics['open_metrics_pct']=score_open(opened)
+    metrics['calibrated_subset']['open_metrics_pct']=score_open(eligible_open)
     save(root/'metrics.json',metrics)
     esc=html.escape
     parts=['<!doctype html><meta charset="utf-8"><title>WSI-VQA复现统计与案例</title><style>body{max-width:1450px;margin:30px auto;padding:0 24px;font:16px/1.7 system-ui;color:#243b50}table{border-collapse:collapse;width:100%}td,th{padding:12px;border:1px solid #ccd5df;text-align:left}th{background:#edf3f8}.cards{display:flex;flex-wrap:wrap;gap:15px}.card{width:300px;border:1px solid #d8e0e8;padding:12px}.card img{width:100%}pre{white-space:pre-wrap;font:14px/1.6 system-ui}section{margin-top:40px;border-top:2px solid #bacbd8;padding-top:20px}</style><h1>WSI-VQA：统计与三个固定案例</h1>']
     parts.append('<p>86张WSI、735问答；5倍全组织候选，无64个上限；初选ceil10%、补选ceil5%、Top5专项观察、最多5轮。PLIP、Patho-R1-7B、Qwen3-4B；Quilt非量化通用描述。采用论文图例的逐区域计划与高倍后反思，歧义选择和预处理参数详见protocol.json与Git改动说明。</p>')
+    if exclusions:
+        parts.append('<p><b>校准范围：</b>缺少扫描倍率的'+esc(', '.join(exclusions))+'未运行，也未猜测倍率。'
+                     f'实际纳入{len(manifest)}张WSI、{len(eligible_rows)}题；'
+                     '原735题完整统计保留未运行题（闭题计错，开放题为空输出），并另列实际校准子集结果，二者不混用。</p>')
     parts.append('<table><tr><th>统计项</th><th>本次结果</th></tr>'+''.join('<tr><td>'+esc(k)+'</td><td>'+esc(str(v))+'</td></tr>' for k,v in metrics.items())+'</table>')
     chosen=['TCGA-BH-A202','TCGA-D8-A27M','TCGA-LD-A74U']
     examples=[]
