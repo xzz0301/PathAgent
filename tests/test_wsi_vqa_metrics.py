@@ -1,5 +1,9 @@
 import unittest
-from tools.evaluate_wsi_vqa import compatible_correct, norm, collect_rows
+import json
+import tempfile
+from pathlib import Path
+from tools.evaluate_wsi_vqa import compatible_correct, norm, collect_rows, require_eligible_coverage
+from data_processing.utils import load_all_vqa_pairs
 
 
 class WsiVqaMetricTests(unittest.TestCase):
@@ -25,6 +29,27 @@ class WsiVqaMetricTests(unittest.TestCase):
         self.assertEqual(sum(r['calibration_eligible'] for r in rows),1)
         self.assertEqual(rows[1]['status'],'uncalibrated')
         self.assertEqual(opened[0]['prediction'],'')
+
+    def test_dx2_questions_are_loaded_and_unrelated_paths_are_ignored(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);patches=root/'patches';patches.mkdir()
+            for name in ['TCGA-D8-A73U-01Z-00-DX2.scan','TCGA-D8-A1JK-01Z-00-DX1.scan',
+                         'TCGA-XX-XXXX-01Z-00-DX1.unrelated']:
+                (patches/name).mkdir()
+            (patches/'TCGA-D8-A73U-file-not-a-folder').write_text('ignored')
+            questions=[{'Id':'TCGA-D8-A73U','Question':f'question {i}','Answer':'WITHHELD'} for i in range(10)]
+            questions.append({'Id':'TCGA-D8-A1JK','Question':'another','Answer':'WITHHELD'})
+            source=root/'questions.json';source.write_text(json.dumps(questions))
+            pairs=load_all_vqa_pairs(str(source),image_dir=str(patches))
+            self.assertEqual(len(pairs),11)
+            self.assertEqual(sum(p['short_id']=='TCGA-D8-A73U' for p in pairs),10)
+            self.assertTrue(all(p['long_id'].endswith('.scan') for p in pairs))
+
+    def test_incomplete_eligible_results_cannot_be_finalized(self):
+        with self.assertRaisesRegex(ValueError,'1 unanswered eligible'):
+            require_eligible_coverage([{'index':3,'calibration_eligible':True,'prediction':''}])
+        require_eligible_coverage([{'index':3,'calibration_eligible':False,'prediction':''},
+                                  {'index':4,'calibration_eligible':True,'prediction':'answer'}])
 
 
 if __name__=='__main__':unittest.main()

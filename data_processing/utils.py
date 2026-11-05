@@ -44,7 +44,9 @@ def load_all_vqa_pairs(vqa_file, dataset_name='wsi_vqa', image_dir=None):
             case2qas.setdefault(sid, []).append(item)
 
         if image_dir is not None:
-            dirs = [d for d in os.listdir(image_dir) if "DX1" in d]
+            # Match question case IDs; valid WSI-VQA slides also include DX2.
+            dirs = [d for d in os.listdir(image_dir)
+                    if os.path.isdir(os.path.join(image_dir, d)) and d[:12] in case2qas]
         else:
             dirs = case2qas.keys()
 

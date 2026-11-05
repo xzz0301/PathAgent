@@ -51,6 +51,13 @@ def collect_rows(reference, by_case, results, exclusions):
     return rows,closed,opened
 
 
+def require_eligible_coverage(rows):
+    missing=[r['index'] for r in rows if r['calibration_eligible'] and not r['prediction']]
+    if missing:
+        raise ValueError(f'Incomplete calibrated evaluation: {len(missing)} unanswered eligible questions; '
+                         f'reference indices={missing}')
+
+
 def main():
     p=argparse.ArgumentParser();p.add_argument('--root',type=Path,required=True);a=p.parse_args();root=a.root
     reference=json.loads((root/'inputs/reference.json').read_text())
@@ -65,6 +72,7 @@ def main():
             results[(value['long_id'],value['question'])]=(value,f)
     rows,closed,opened=collect_rows(reference,by_case,results,exclusions)
     assert len(rows)==735 and len(closed)==390 and len(opened)==345
+    require_eligible_coverage(rows)
     save(root/'case_results.json',rows)
     eligible_closed=[r for r in closed if r['calibration_eligible']]
     eligible_open=[r for r in opened if r['calibration_eligible']]
