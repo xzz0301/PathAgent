@@ -39,10 +39,12 @@ python -m unittest tests.test_consolidated tests.test_paper_navigation tests.tes
 Quilt使用独立兼容环境，见[部署说明](docs/quilt_20261031.md)。WSI预处理还需要OpenSlide及OpenCV；开放题指标需要`pycocoevalcap`和Java，可用`tools/setup_wsi_metrics.py`准备用户目录依赖。正式服务器运行配置为`configs/wsi_vqa_paper.json`；`local_8gb.json`是可选本地配置，不用于论文复现。
 
 ```bash
-python tools/run_wsi_vqa.py --server /path/to/pathagent --dataset /path/to/wsi-vqa --output /path/to/new_run
+python tools/run_wsi_vqa.py --server /path/to/pathagent --dataset /path/to/wsi-vqa --output /path/to/new_run --gpus 0,1
 ```
 
-全测试尚在运行；统计和案例验收后再冻结基线、建立`dev_trajectory`。以下保留作者原始项目说明，原说明中的路径和命令需按实际环境配置。
+`--gpus`只允许一或两张物理GPU，例如`--gpus 2`为单卡；所有准备和推理阶段均限制在所选设备。默认将PLIP与Qwen3放在同一卡。
+
+85张有可靠倍率的切片、726题推理及三个预定案例已完成。原735题完整分母闭题兼容准确率46.15%，实际校准子集46.75%，未达到论文56.32%；缺倍率的9题保持缺失并列报告。完整口径、开放题指标、方法歧义与运行来源见[结果说明](docs/wsi_vqa_baseline_results.md)。历史本轮曾用三卡，后续资源限制不改写已完成实验记录。统计和案例验收后冻结基线、建立`dev_trajectory`。以下保留作者原始项目说明，原说明中的路径和命令需按实际环境配置。
 
 ## Overview
 
