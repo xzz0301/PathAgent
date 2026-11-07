@@ -8,5 +8,5 @@
   "quantization": "none",
   "executor_device_map": "cuda:0",
   "perceptor_device_map": "cuda:1",
-  "plip_device": "cuda:2"
+  "plip_device": "cuda:0"
 }

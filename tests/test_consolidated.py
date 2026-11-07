@@ -31,6 +31,21 @@ class FakePLIP:
 
 
 class ConsolidationTests(unittest.TestCase):
+    def test_runner_allocation_rejects_three_gpus(self):
+        import argparse
+        from tools.run_wsi_vqa import parse_gpu_ids
+        self.assertEqual(parse_gpu_ids('2'),[2])
+        self.assertEqual(parse_gpu_ids('0,2'),[0,2])
+        for value in ('0,1,2','0,0','-1','auto',''):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                parse_gpu_ids(value)
+
+    def test_server_profiles_use_at_most_two_gpus(self):
+        for name in ('server_original.json','wsi_vqa_paper.json'):
+            config=json.loads((ROOT/'configs'/name).read_text())
+            devices={config[k] for k in ('executor_device_map','perceptor_device_map','plip_device')}
+            self.assertLessEqual(len(devices),2)
+
     def args(self, *extra):
         args = pathagent.parse_args([
             "--config", str(ROOT / "configs/local_8gb.json"),

@@ -29,6 +29,16 @@ def gpu_free(index):
     return int(output.strip())<512
 
 
+def parse_gpu_ids(value):
+    try:
+        devices=[int(v.strip()) for v in value.split(',')]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('Use one or two nonnegative GPU indices') from exc
+    if not 1<=len(devices)<=2 or len(set(devices))!=len(devices) or min(devices)<0:
+        raise argparse.ArgumentTypeError('Use one or two distinct nonnegative GPU indices')
+    return devices
+
+
 def caption_worker(root, gpu, server):
     import torch
     torch.manual_seed(128); torch.cuda.manual_seed_all(128)
@@ -83,6 +93,8 @@ def main():
     p.add_argument('--dataset', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--caption-worker', type=int)
+    p.add_argument('--gpus', type=parse_gpu_ids, default=parse_gpu_ids('0,1'),
+                   help='One or two physical GPU indices; all phases stay within this allocation')
     p.add_argument('--uncalibrated-case', action='append', default=[])
     p.add_argument('--adopt-caption-worker', type=int,
                    help='Wait for the already running shard-0 worker, then fill any remaining shard-0 cases')
@@ -101,10 +113,14 @@ def main():
     save(status_path,state)
     py = a.server/'envs/runtime/bin/python'
     quilt_py = a.server/'envs/quilt_20261031/bin/python'
+    base_env={**os.environ,'CUDA_VISIBLE_DEVICES':','.join(map(str,a.gpus))}
+    java_bin=a.server/'tools/jre/bin'
+    if (java_bin/'java').is_file():
+        base_env['PATH']=str(java_bin)+os.pathsep+base_env.get('PATH','')
 
     def run(command, filename, env=None):
         with (a.output/filename).open('a') as log:
-            subprocess.run([str(x) for x in command],cwd=PROJECT,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
+            subprocess.run([str(x) for x in command],cwd=PROJECT,env=env or base_env,stdout=log,stderr=subprocess.STDOUT,check=True)
 
     try:
         state['stage']='preparing_full_candidates';save(status_path,state)
@@ -116,28 +132,31 @@ def main():
             run(command,'prepare.log')
         state['stage']='quilt_generic_descriptions';save(status_path,state)
 
-        def worker(gpu):
-            if gpu==0 and a.adopt_caption_worker:
-                # The pre-existing shard-0 process uses physical GPU2. Its
-                # in-memory model and caption loop remain untouched.
-                while process_running(a.adopt_caption_worker):
-                    time.sleep(15)
-                prior=json.loads((a.output/'caption_worker_0.json').read_text())
-                if prior.get('stage')!='complete':
-                    raise RuntimeError('Adopted caption worker exited without completion')
-            device={0:2,1:0,2:1}[gpu] if a.adopt_caption_worker else gpu
+        # Legacy adoption must finish before starting any additional allocation.
+        if a.adopt_caption_worker:
+            while process_running(a.adopt_caption_worker):
+                time.sleep(15)
+            prior=json.loads((a.output/'caption_worker_0.json').read_text())
+            if prior.get('stage')!='complete':
+                raise RuntimeError('Adopted caption worker exited without completion')
+
+        def worker(gpu,device):
             while not gpu_free(device):
                 save(a.output/f'waiting_caption_gpu_{gpu}.json',{'gpu':device,'stage':'waiting_for_free_gpu','updated':time.time()})
                 time.sleep(20)
-            env={**os.environ,'CUDA_VISIBLE_DEVICES':str(gpu),
+            env={**base_env,'CUDA_VISIBLE_DEVICES':str(device),
                  'PYTHONPATH':str(a.server/'code/quilt_7e70fc3_20261031'),
                  'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1'}
-            env['CUDA_VISIBLE_DEVICES']=str(device)
             run([quilt_py,'-u',Path(__file__),'--server',a.server,'--dataset',a.dataset,'--output',a.output,
                  '--caption-worker',gpu],f'quilt_{gpu}.log',env)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-            futures=[pool.submit(worker,gpu) for gpu in range(3)]
+        def lane(index,device):
+            # Preserve the three historical data shards while limiting concurrent models.
+            for shard in range(index,3,len(a.gpus)):
+                worker(shard,device)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(a.gpus)) as pool:
+            futures=[pool.submit(lane,index,device) for index,device in enumerate(a.gpus)]
             for future in futures:
                 future.result()
         merged={}
@@ -149,11 +168,12 @@ def main():
         save(a.output/'inputs/descriptions.json',merged)
         state['stage']='plip_features';save(status_path,state)
         if not (a.output/'features_complete.json').exists():
-            while not gpu_free(0):
+            while not gpu_free(a.gpus[0]):
                 time.sleep(20)
             run([py,PROJECT/'tools/prepare_plip_features.py','--input',a.output/'inputs','--project',PROJECT],'features.log')
             save(a.output/'features_complete.json', {'slides':len(manifest)})
         config=json.loads((PROJECT/'configs/wsi_vqa_paper.json').read_text())
+        config.update(executor_device_map='cuda:0',perceptor_device_map=f'cuda:{len(a.gpus)-1}',plip_device='cuda:0')
         for key in ['plip_lib_path','qwen_ckpt','plip_ckpt','patho_r1_ckpt']:
             config[key]=str(PROJECT/config[key])
         inp=a.output/'inputs'
@@ -162,7 +182,7 @@ def main():
                       geometry_file=str(inp/'geometry.json'),wsi_manifest=str(inp/'wsi_manifest.json'))
         save(a.output/'run_config.json',config)
         state['stage']='full_test_inference';save(status_path,state)
-        while not all(gpu_free(i) for i in [0,1,2]):
+        while not all(gpu_free(i) for i in a.gpus):
             state['stage']='waiting_for_inference_gpus';save(status_path,state)
             time.sleep(20)
         state['stage']='calibrated_test_inference';save(status_path,state)
